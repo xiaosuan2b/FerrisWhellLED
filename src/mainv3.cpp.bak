@@ -1,0 +1,877 @@
+#include <Arduino.h>
+
+#include <IRremote.hpp>
+#include <FastLED.h>
+
+
+/* PIN declaration */
+
+#define RCLK 4	// 74HC595 锁存器  大平台
+#define SRCLK 3 // 595 时钟         活塞
+#define SER 2	// 595 data input    资料
+
+// #define big RCLK   // 大平台
+// #define push SRCLK // 活塞
+// #define datain SER // 资料
+
+#define LED_STRIP_PIN 5 // 灯带
+
+#define R_PIN 9
+#define G_PIN 10
+#define B_PIN 11
+
+#define IR_PIN 7
+
+#define SWITCH_PIN 8
+
+
+/*  Other constant value declaration  */
+
+#define num595 7 // The number of 595
+
+#define NUM_LEDS 60         // 定义LED数量，根据实际灯带长度修改
+#define BRIGHTNESS 20      // 设置亮度（0到255之间）
+#define LED_TYPE WS2812B    // 定义LED类型
+#define COLOR_ORDER GRB     // WS2812B的颜色顺序为GRB
+#define update_duration 500
+
+byte sheet[num595];
+
+CRGB led_strip[NUM_LEDS];        // 灯带数组
+
+
+/*  Statue list */
+/**
+ * total_statue decides other's statue
+ * 	depending on statue mechine
+ * 	which updates statues every update_duration.
+ * 
+ */
+
+byte statue_total = 1;
+	// 0: off
+	// 1:
+
+
+byte statue_led = 1;
+	// 0: off
+	// 1: effect1
+	// 2: effect2
+
+byte statue_rgb = 1;
+	// 0: off
+	// 1: rainbow
+
+byte statue_led_strip = 1;
+	// 0: off
+	// 1: rainbow
+
+
+byte lastLEDeffect = 1; // 上一个调用的led effect
+
+
+// effect functions declaration
+void led_effect0();
+void led_effect1(); 
+void led_effect2();
+void led_effect3();
+
+
+void (*led_effects[])() = {led_effect0, led_effect1, led_effect2, led_effect3};
+
+
+// It is considered that 
+//	the number of led states 
+// 	is the total number of states
+byte last_statue = sizeof(led_effects) / sizeof(led_effects[0]) - 1 ;
+
+int hue = 0;
+unsigned short led_delay = 500;
+
+
+/* LED position list*/
+// 外圈
+byte circle[][24] = {
+	{0, 1, 2, 3, 4, 5, 6, 7,
+	 8, 9, 10, 11, 12, 13, 14, 15,
+	 16, 17, 18, 19, 20, 21, 22, 23, 
+	}
+};
+
+byte circle_num = 1;
+byte single_circle_num = 24;
+
+
+// 辐条
+byte spokes[][4] = { 
+	{24, 25, 26, 27}, {28, 29, 30, 31},
+	{32, 33, 34, 35}, {36, 37, 38, 39},
+	{40, 41, 42, 43}, {44, 45, 46, 47},
+	{48, 49, 50, 51}, {52, 53, 54, 55},
+};
+
+byte spokes_num = sizeof(spokes) / sizeof(spokes[0]);
+
+/* timer value */
+unsigned long currentMillis = 0;
+
+unsigned long lastSwitchUpdate = 0;
+unsigned long lastIRUpdate = 0;
+unsigned long lastRGBUpdate = 0;
+unsigned long lastLEDUpdate = 0;
+unsigned long lastLEDStripUpdate = 0;
+unsigned long lastStatueMachineUpdate = 0;
+
+// unsigned long lastEffectUpdate = 0;
+
+
+void sheet_clear()
+{
+	memset(sheet, B11111111, num595);
+}
+
+void set_sheet_bit(byte pos, bool value)
+{
+	// pos counts from 0
+	byte byteIndex = pos / 8;          // 找到目标字节
+    byte bitIndex = 7 - (pos % 8);     // 确定位于目标字节中的位位置（从高位到低位）
+
+    if (value) {
+        sheet[byteIndex] |= (1 << bitIndex);   // 设置该位为 1
+    } else {
+        sheet[byteIndex] &= ~(1 << bitIndex);  // 清除该位为 0
+    }
+
+}
+
+
+void Register_update_with_lines(byte lines[num595])
+{
+	/** Update register with given lines
+	 * @param byte lines[num595]
+	 */
+
+	digitalWrite(RCLK, LOW);
+
+	for (int i = num595-1; i >= 0; i--)
+	{
+		shiftOut(SER, SRCLK, LSBFIRST, lines[i]);
+
+	}
+ 
+	digitalWrite(RCLK, HIGH);
+}
+
+void Register_clear()
+{
+	for(int i = 0; i < 2; i++){
+		byte lines[num595];
+		memset(lines, B11111111, num595);
+		Register_update_with_lines(lines);
+	}
+
+	// for (int i = 0; i < num595; i++)
+	// {
+	// 	byte l[] = {B11111111};
+	// 	Register_update_with_lines(l);
+	// 	delay(10);
+	// }
+	
+
+
+	
+}
+
+void Register_update_no_clear()
+{
+	// Update the register without clearing it 
+	// 		in order to reach higher speed.
+
+	Register_update_with_lines(sheet);
+}
+
+void Register_update()
+{
+	// Update the register.
+	// Use this method to update it with file-scope sheet.
+
+
+	Register_clear();
+	Register_update_no_clear();
+}
+
+// HSV到RGB的转换函数
+void hsv_to_rgb(int h, int s, int v, byte &r, byte &g, byte &b)
+{
+	float H = h / 360.0f;
+	float S = s / 100.0f;
+	float V = v / 100.0f;
+
+	int i = (int)(H * 6.0f);
+	float f = H * 6.0f - i;
+	float p = V * (1.0f - S);
+	float q = V * (1.0f - f * S);
+	float t = V * (1.0f - (1.0f - f) * S);
+
+	float r_float, g_float, b_float;
+	switch (i % 6)
+	{
+	case 0:
+		r_float = V, g_float = t, b_float = p;
+		break;
+	case 1:
+		r_float = q, g_float = V, b_float = p;
+		break;
+	case 2:
+		r_float = p, g_float = V, b_float = t;
+		break;
+	case 3:
+		r_float = p, g_float = q, b_float = V;
+		break;
+	case 4:
+		r_float = t, g_float = p, b_float = V;
+		break;
+	case 5:
+		r_float = V, g_float = p, b_float = q;
+		break;
+	}
+
+	r = (byte)(r_float * 255);
+	g = (byte)(g_float * 255);
+	b = (byte)(b_float * 255);
+}
+
+void rgbThread()
+{
+	/**
+	 * Update the rgb only by update the value of HSV.
+	 * This method provides smoother visual transitions.
+	 */
+
+	switch (statue_rgb)
+	{
+		case 0: // off
+			digitalWrite(R_PIN, HIGH);
+			digitalWrite(G_PIN, HIGH);
+			digitalWrite(B_PIN, HIGH);
+			break;
+
+		case 1: // rainbow
+			// 计算并更新RGB颜色
+
+			byte r, g, b;
+			hsv_to_rgb(hue, 100, 100, r, g, b); // 获取当前的RGB颜色
+			analogWrite(R_PIN, r);
+			analogWrite(G_PIN, g);
+			analogWrite(B_PIN, b);
+
+			// 增加hue值来使颜色变化
+			hue = (hue + 10) % 360;
+			break;
+		
+		default:
+			statue_rgb = 0;
+			break;
+	}
+	
+}
+
+byte r = 255, g = 0, b = 0;
+
+void rgbThread_2()
+{
+	/**
+	 * Update the rgb only by update the value of RGB
+	 * 		in order to reach higher speed.
+	 */
+
+
+	byte step = 10;
+	 if (r == 255 && g < 255 && b == 0) {      // 红 -> 黄
+        g += step;
+        if (g > 255) g = 255;
+    } else if (r > 0 && g == 255 && b == 0) { // 黄 -> 绿
+        r -= step;
+        if (r < 0) r = 0;
+    } else if (r == 0 && g == 255 && b < 255) { // 绿 -> 青
+        b += step;
+        if (b > 255) b = 255;
+    } else if (r == 0 && g > 0 && b == 255) {   // 青 -> 蓝
+        g -= step;
+        if (g < 0) g = 0;
+    } else if (r < 255 && g == 0 && b == 255) { // 蓝 -> 紫
+        r += step;
+        if (r > 255) r = 255;
+    } else if (r == 255 && g == 0 && b > 0) {   // 紫 -> 红
+        b -= step;
+        if (b < 0) b = 0;
+    }
+
+    // 更新RGB引脚的输出
+    analogWrite(R_PIN, r);
+    analogWrite(G_PIN, g);
+    analogWrite(B_PIN, b);
+
+}
+
+// void turn_on()
+// {
+// 	rgb_on = true;
+// 	led_on = true;
+// 	led_strip_on = true;
+
+// 	is_on = true;
+// }
+
+// void turn_off()
+// {
+// 	statue_led = 0;
+
+// 	rgb_on = false;
+// 	led_on = false;
+// 	led_strip_on = false;
+
+// 	digitalWrite(R_PIN, HIGH);
+// 	digitalWrite(G_PIN, HIGH);
+// 	digitalWrite(B_PIN, HIGH);
+
+// 	Register_clear();
+
+// 	is_on = false;
+
+// }
+
+void to_previous_statue()
+{
+	if (statue_total == 0)
+	{
+		// new count loop
+		statue_total = last_statue;
+
+	}else
+	{
+		statue_total--;
+	}
+	
+	Serial.println("to_previous_statue() triggered");
+	Serial.println("Current statue is :");
+	Serial.println(statue_total);
+
+}
+
+void to_next_statue()
+{
+	if (statue_total == last_statue)
+	{
+		// new count loop
+		statue_total = 0;
+	}else
+	{
+
+		statue_total++;
+		
+	}
+	
+	Serial.println("to_next_statue() triggered");
+	Serial.println("Current statue is :");
+	Serial.println(statue_total);
+}
+
+#define reliable_count 3
+
+short trigger_times = 0;
+
+void switchThread()
+{
+	static byte high_count = 0;
+
+	
+    if (digitalRead(SWITCH_PIN) == HIGH) 
+	{
+		Serial.println("Switch detected");
+		high_count++;
+		Serial.println(high_count);
+	}
+	
+
+	if (high_count >= reliable_count) 
+	{
+		to_next_statue();
+		high_count = 0;
+
+		trigger_times++;
+
+		Serial.println("Cumulative trigger times");
+		Serial.println(trigger_times);
+
+		
+		Serial.println("Current statue");
+		Serial.println(statue_led);
+	}
+}
+
+void switchThread2()
+{
+	if (digitalRead(SWITCH_PIN) == HIGH)
+	{
+		to_next_statue();
+		Serial.println("Statue Switched");
+
+	}
+	
+}
+
+
+void irThread()
+{
+	if (IrReceiver.decode())
+	{
+
+		// Print it to Serial
+		Serial.println(IrReceiver.decodedIRData.decodedRawData, HEX);
+		IrReceiver.printIRResultShort(&Serial);
+
+		switch (IrReceiver.decodedIRData.decodedRawData)
+		{
+			case 0xBA45FF00: // Keypad button "power"
+
+				switch (statue_total)
+				{
+				case 0:
+					statue_total = 1;
+					break;
+				
+				default:
+					statue_total = 0;
+					break;
+				}
+				
+				
+				break;
+
+			case 0xBF40FF00: // Keypad button "Previous"
+				to_previous_statue();
+				break;
+
+			case 0xBC43FF00: // Keypad button "Next"
+				to_next_statue();
+				break;
+
+			case 0xE916FF00: // Keypad button "0"
+				statue_total = 0;
+				break;
+
+			case 0xF30CFF00: // Keypad button "1"
+				statue_total = 1;
+				break;
+			
+			case 0xE718FF00: // Keypad button "2"
+				statue_total = 2;
+				break;
+			
+			case 0xA15EFF00: // Keypad button "3"
+				statue_total = 3;
+				break;
+			
+			// case 0xF708FF00: // Keypad button "4"
+			// 	statue_total = 4;
+			// 	break;
+
+
+			
+			default:
+				break;
+		}
+
+		IrReceiver.resume(); // Enable receiving of the next value
+	}
+}
+
+
+
+void led_effect0()
+{
+	// setup
+	if (lastLEDeffect != 0)
+	{
+		led_delay = 500;
+		sheet_clear();
+		lastLEDeffect = 0;
+	}
+
+	Register_clear();
+}
+
+
+void led_effect1()
+{
+	/* led always on*/
+	// setup
+	// reset sheet
+	if (lastLEDeffect != 1)
+	{
+		led_delay = 500;
+		sheet_clear();
+		lastLEDeffect = 1;
+	}
+
+	// light all
+
+	for (int i = 0; i < num595; i++)
+	{
+		byte lines[num595];
+		memset(lines, B00000000, num595);
+		Register_update_with_lines(lines);
+	}
+	
+
+}
+
+
+void led_effect2()
+{
+	/* Flow forward and back */
+	
+	// setup
+	// reset sheet
+	if (lastLEDeffect != 2)
+	{
+		led_delay = 300;
+		sheet_clear();
+		lastLEDeffect = 2;
+	}
+
+
+	static byte i = 0;
+	static bool forward = true;
+
+	sheet_clear();
+
+	if (i == (num595*8-1))
+	{
+		forward = false;
+	}else if (i == 0)
+	{
+		forward = true;
+	}
+	
+	
+	
+	set_sheet_bit(i, 0);
+	Register_update();
+
+	forward ? i++ : i--;
+	
+}
+
+byte current_spread_pos = 0;
+
+void led_spread_reset()
+{
+	current_spread_pos = 0;
+	for (byte i = 0; i < spokes_num; i++)
+	{
+		for (byte j = 0; j < 4; j++)
+		{
+			set_sheet_bit(spokes[i][j], 1);
+		}
+		
+	}
+	
+}
+
+void led_spread_out()
+{	
+	/**
+	 * The effect that light the led of spokes spreading out
+	 * It's your duty to update the sheet
+	 */
+	if (current_spread_pos == 4)
+	{
+		led_delay = 1;
+		led_spread_reset();
+		return;
+	}
+	
+	
+
+	for (int i = 0; i < spokes_num; i++)
+	{
+		set_sheet_bit(spokes[i][current_spread_pos],0);
+	}
+	
+	current_spread_pos++;
+}
+
+void led_effect3()
+{
+	/** 
+	 * spread out and rotate
+	*/
+
+	static bool circle_light_forward = true;
+	static byte current_circle_pos = 0;
+	static unsigned long lastSpreadUpdate = 0;
+	static unsigned long lastRotateUpdate = 0;
+	static byte spread_wait_durations = 0;
+
+	// effect setup
+	if (lastLEDeffect != 3)
+	{
+		sheet_clear();
+		Register_clear();
+		lastLEDeffect = 3;
+
+		current_spread_pos = 0;
+		current_circle_pos = 0;
+		circle_light_forward = true;
+	}
+
+
+
+	// spread out
+	if (currentMillis - lastSpreadUpdate >= 1000)
+	{
+		if (spread_wait_durations > 0)
+		{
+			spread_wait_durations--;
+		}else
+		{
+			led_spread_out();
+		}
+		
+		lastSpreadUpdate = currentMillis;
+		
+	}
+
+	
+	// rotate
+
+	if (currentMillis - lastRotateUpdate >= 50)
+	{
+		lastRotateUpdate = currentMillis;
+
+		for (byte i = 0; i < circle_num; i++)
+		{	
+			set_sheet_bit(circle[i][current_circle_pos],
+							circle_light_forward ? 0 : 1);
+			current_circle_pos++;
+		}
+		
+		if (current_circle_pos >= single_circle_num)
+		{
+			// Change the action
+			current_circle_pos = 0;
+			circle_light_forward = !circle_light_forward;
+		}
+
+
+		// put the update function in the less duration one.
+		Register_update();
+	}
+
+	
+	
+
+
+
+	
+}
+
+
+
+void ledThread()
+{
+
+	led_effects[statue_led]();
+	// effect1();
+
+}
+
+void ledStripThread()
+{
+	switch (statue_led_strip)
+	{
+		case 0: // off
+			FastLED.clear();
+			FastLED.show();
+
+			break;
+
+		case 1: // rainbow
+			static uint8_t hue = 0;   // 定义初始色相，从0开始
+			fill_rainbow(led_strip, NUM_LEDS, hue, 7);  // 使用彩虹效果填充灯带，每个LED色相差为7
+
+			FastLED.show();           // 更新灯带显示
+			hue++;                    // 增加色相，使颜色逐渐变化
+
+			break;
+		
+		default:
+			statue_led_strip = 0;
+			break;
+	}
+	
+}
+
+void setup()
+{
+	pinMode(SWITCH_PIN, INPUT);
+
+	pinMode(RCLK, OUTPUT);
+	pinMode(SRCLK, OUTPUT);
+	pinMode(SER, OUTPUT);
+
+	pinMode(R_PIN, OUTPUT);
+	pinMode(G_PIN, OUTPUT);
+	pinMode(B_PIN, OUTPUT);
+
+	Serial.begin(9600);
+	IrReceiver.begin(IR_PIN, ENABLE_LED_FEEDBACK);
+
+	FastLED.addLeds<LED_TYPE, LED_STRIP_PIN, COLOR_ORDER>(led_strip, NUM_LEDS).setCorrection(TypicalLEDStrip);
+  	FastLED.setBrightness(BRIGHTNESS);
+}
+
+void statue_machine()
+{
+	// updates all statues
+	// statue_led, statue_rgb
+	switch (statue_total)
+	{
+		case 0:
+			statue_led = 0;
+			statue_rgb = 0;
+			statue_led_strip = 0;
+
+			break;
+		case 1:
+			statue_led = 1;
+			statue_rgb = 1;
+			statue_led_strip = 1;
+			break;
+		
+		case 2:
+			statue_led = 2;
+			statue_rgb = 1;
+			statue_led_strip = 1;
+
+			break;
+
+		case 3:
+			statue_led = 3;
+			statue_rgb = 1;
+			statue_led_strip = 1;
+
+			break;
+		
+		
+		default:
+			statue_total = 0;
+			break;
+	}
+	
+}
+
+void loop()
+{
+
+	currentMillis = millis();
+
+	if (currentMillis - lastStatueMachineUpdate >= update_duration)
+	{
+		lastStatueMachineUpdate = currentMillis;
+
+		statue_machine();
+	}
+
+	// if (currentMillis - lastSwitchUpdate >= 50)
+	// {
+	// 	lastSwitchUpdate = currentMillis;
+
+	// 	switchThread();
+	// }
+
+	if (currentMillis - lastIRUpdate >= 50)
+	{
+		lastIRUpdate = currentMillis;
+
+		irThread();
+	}
+
+	// // 卫语句
+	// // is_on == false 直接下一次 loop
+	// if(!is_on)
+	// 	return;
+
+
+	// if (rgb_on)
+	// {
+	// 	if (currentMillis - lastRGBUpdate >= 100)
+	// 	{
+	// 		lastRGBUpdate = currentMillis;
+
+	// 		rgbThread();
+	// 	}
+	// }
+
+	// if (led_on)
+	// {
+	// 	if (currentMillis - lastLEDUpdate >= led_delay)
+	// 	{
+	// 		lastLEDUpdate = currentMillis;
+
+	// 		ledThread();
+	// 	}
+	// }
+
+	// if (led_strip_on)
+	// {
+	// 	if (currentMillis - lastLEDStripUpdate >= 100)
+	// 	{
+	// 		lastLEDStripUpdate = currentMillis;
+
+	// 		ledStripThread();
+	// 	}
+	// }
+	
+
+
+	
+	if (currentMillis - lastRGBUpdate >= 100)
+	{
+		lastRGBUpdate = currentMillis;
+
+		rgbThread();
+	}
+
+
+
+	if (currentMillis - lastLEDUpdate >= led_delay)
+	{
+		lastLEDUpdate = currentMillis;
+
+		ledThread();
+	}
+
+
+
+	if (currentMillis - lastLEDStripUpdate >= 100)
+	{
+		lastLEDStripUpdate = currentMillis;
+
+		ledStripThread();
+	}
+	
+	
+
+
+	
+
+
+
+
+	
+
+	// delay(500);
+}
