@@ -240,7 +240,7 @@ void invert_sheet_bit(byte pos)
     byte bitIndex = 7 - (pos % 8);     // 确定位于目标字节中的位位置（从高位到低位）
 
     
-    sheet[byteIndex] ^= (1 << bitIndex);   // 设置该位为 1
+    sheet[byteIndex] ^= (1 << bitIndex);   // 反转该位
    
 
 }
